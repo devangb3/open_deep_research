@@ -70,7 +70,13 @@ Open Deep Research supports a wide range of LLM providers via the [init_chat_mod
 
 > Note: the selected model will need to support [structured outputs](https://python.langchain.com/docs/integrations/chat/) and [tool calling](https://python.langchain.com/docs/how_to/tool_calling/).
 
-> Note: For OpenRouter: Follow [this guide](https://github.com/langchain-ai/open_deep_research/issues/75#issuecomment-2811472408) and for local models via Ollama  see [setup instructions](https://github.com/langchain-ai/open_deep_research/issues/65#issuecomment-2743586318).
+> Note: OpenRouter can be used through the `openai:` provider path:
+> 1. Set either `OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
+> 2. Set `OPENAI_BASE_URL=https://openrouter.ai/api/v1` (or `OPENROUTER_BASE_URL`).
+> 3. Use model names like `openai:anthropic/claude-sonnet-4`.
+> 4. For `search_api`, prefer `tavily` unless your selected model supports the chosen native web search tool.
+>
+> For local models via Ollama, see [setup instructions](https://github.com/langchain-ai/open_deep_research/issues/65#issuecomment-2743586318).
 
 #### Search API :mag:
 
