@@ -7,10 +7,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 import uvicorn
+
+
+def _load_local_env() -> None:
+    adapter_dir = Path(__file__).resolve().parent
+    load_dotenv(adapter_dir / ".env", override=False)
+    load_dotenv(override=False)
 
 
 def _parse_bool(raw: Optional[str], default: bool) -> bool:
@@ -32,6 +39,7 @@ class OpenDeepResearchRunner:
     """Lazy ODR graph wrapper for /responses execution."""
 
     def __init__(self) -> None:
+        _load_local_env()
         self._graph = None
 
     def _configurable(self) -> Dict[str, Any]:
