@@ -36,11 +36,20 @@ python experiments/open_deep_research/orchestrator_adapter.py \
 
 Core:
 
-- `ODR_SEARCH_API=tavily|openai|anthropic|none`
+- `ODR_SEARCH_API=tavily|openai|openrouter|anthropic|none`
 - `ODR_ALLOW_CLARIFICATION=false`
 - `ODR_MAX_RESEARCHER_ITERATIONS=4`
 - `ODR_RESEARCH_MODEL=openai:gpt-4.1`
 - `ODR_FINAL_REPORT_MODEL=openai:gpt-4.1`
+
+OpenRouter web search:
+
+- `ODR_OPENROUTER_WEB_SEARCH_ENGINE=auto|native|exa|firecrawl|parallel`
+- `ODR_OPENROUTER_WEB_SEARCH_MAX_RESULTS=5`
+- `ODR_OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS=20`
+- `ODR_OPENROUTER_WEB_SEARCH_CONTEXT_SIZE=low|medium|high`
+- `ODR_OPENROUTER_WEB_SEARCH_ALLOWED_DOMAINS=arxiv.org,nature.com`
+- `ODR_OPENROUTER_WEB_SEARCH_EXCLUDED_DOMAINS=reddit.com`
 
 MCP (optional):
 
@@ -49,4 +58,4 @@ MCP (optional):
 - `ODR_MCP_AUTH_REQUIRED=true|false`
 - `ODR_MCP_PROMPT=...`
 
-Note: for Judge4 tool execution through `/tools`, `tavily` is the most practical mode because it yields executable function tools. Native provider web-search modes may rely on non-function tool types.
+Note: for Judge4 tool execution through `/tools`, `tavily` is the most practical mode because it yields executable function tools. Native provider and OpenRouter web-search modes may rely on non-function tool types.

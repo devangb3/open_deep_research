@@ -35,6 +35,22 @@ def _parse_int(raw: Optional[str], default: int) -> int:
         return default
 
 
+def _parse_optional_int(raw: Optional[str]) -> Optional[int]:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _parse_csv(raw: Optional[str]) -> Optional[List[str]]:
+    if raw is None or not raw.strip():
+        return None
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    return items or None
+
+
 class OpenDeepResearchRunner:
     """Lazy ODR graph wrapper for /responses execution."""
 
@@ -48,16 +64,30 @@ class OpenDeepResearchRunner:
             "max_structured_output_retries": _parse_int(os.getenv("ODR_MAX_STRUCTURED_OUTPUT_RETRIES"), 3),
             "max_concurrent_research_units": _parse_int(os.getenv("ODR_MAX_CONCURRENT_RESEARCH_UNITS"), 4),
             "search_api": os.getenv("ODR_SEARCH_API", "tavily"),
+            "openrouter_web_search_engine": os.getenv("ODR_OPENROUTER_WEB_SEARCH_ENGINE", "auto"),
+            "openrouter_web_search_max_results": _parse_optional_int(
+                os.getenv("ODR_OPENROUTER_WEB_SEARCH_MAX_RESULTS")
+            ),
+            "openrouter_web_search_max_total_results": _parse_optional_int(
+                os.getenv("ODR_OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS")
+            ),
+            "openrouter_web_search_context_size": os.getenv("ODR_OPENROUTER_WEB_SEARCH_CONTEXT_SIZE"),
+            "openrouter_web_search_allowed_domains": _parse_csv(
+                os.getenv("ODR_OPENROUTER_WEB_SEARCH_ALLOWED_DOMAINS")
+            ),
+            "openrouter_web_search_excluded_domains": _parse_csv(
+                os.getenv("ODR_OPENROUTER_WEB_SEARCH_EXCLUDED_DOMAINS")
+            ),
             "max_researcher_iterations": _parse_int(os.getenv("ODR_MAX_RESEARCHER_ITERATIONS"), 4),
             "max_react_tool_calls": _parse_int(os.getenv("ODR_MAX_REACT_TOOL_CALLS"), 8),
             "summarization_model": os.getenv("ODR_SUMMARIZATION_MODEL", "openai:gpt-4.1-mini"),
-            "summarization_model_max_tokens": _parse_int(os.getenv("ODR_SUMMARIZATION_MODEL_MAX_TOKENS"), 4096),
+            "summarization_model_max_tokens": _parse_optional_int(os.getenv("ODR_SUMMARIZATION_MODEL_MAX_TOKENS")),
             "research_model": os.getenv("ODR_RESEARCH_MODEL", "openai:gpt-4.1"),
-            "research_model_max_tokens": _parse_int(os.getenv("ODR_RESEARCH_MODEL_MAX_TOKENS"), 8000),
+            "research_model_max_tokens": _parse_optional_int(os.getenv("ODR_RESEARCH_MODEL_MAX_TOKENS")),
             "compression_model": os.getenv("ODR_COMPRESSION_MODEL", "openai:gpt-4.1"),
-            "compression_model_max_tokens": _parse_int(os.getenv("ODR_COMPRESSION_MODEL_MAX_TOKENS"), 8000),
+            "compression_model_max_tokens": _parse_optional_int(os.getenv("ODR_COMPRESSION_MODEL_MAX_TOKENS")),
             "final_report_model": os.getenv("ODR_FINAL_REPORT_MODEL", "openai:gpt-4.1"),
-            "final_report_model_max_tokens": _parse_int(os.getenv("ODR_FINAL_REPORT_MODEL_MAX_TOKENS"), 8000),
+            "final_report_model_max_tokens": _parse_optional_int(os.getenv("ODR_FINAL_REPORT_MODEL_MAX_TOKENS")),
         }
 
         mcp_url = os.getenv("ODR_MCP_URL")
@@ -123,12 +153,15 @@ class OpenDeepResearchRunner:
 
         return ""
 
-    async def run(self, user_query: str) -> str:
+    async def run(self, input_messages: List[Dict[str, str]]) -> str:
         graph = self._load_graph()
         config = self.runtime_config()
 
+        if not any(message.get("role") == "user" and message.get("content", "").strip() for message in input_messages):
+            raise RuntimeError("Open Deep Research requires at least one non-empty user message")
+
         final_state = await graph.ainvoke(
-            {"messages": [{"role": "user", "content": user_query}]},
+            {"messages": input_messages},
             config,
         )
         answer = self._extract_text_from_state(final_state)
@@ -238,34 +271,49 @@ class ODRToolGateway:
         return jsonable_encoder(result)
 
 
-def _extract_user_query(input_payload: Any) -> str:
-    if not isinstance(input_payload, list):
+def _extract_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if not isinstance(content, list):
         return ""
 
-    for message in reversed(input_payload):
+    parts: List[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+
+    return "\n".join(parts).strip()
+
+
+def _normalize_input_messages(input_payload: Any) -> List[Dict[str, str]]:
+    if not isinstance(input_payload, list):
+        return []
+
+    normalized_messages: List[Dict[str, str]] = []
+    for message in input_payload:
         if not isinstance(message, dict):
             continue
-        if message.get("role") != "user":
+
+        raw_role = str(message.get("role") or "").strip().lower()
+        if raw_role not in {"system", "developer", "user", "assistant"}:
             continue
 
-        content = message.get("content")
-        if isinstance(content, str):
-            text = content.strip()
-            if text:
-                return text
+        text = _extract_message_text(message.get("content"))
+        if not text:
+            continue
 
-        if isinstance(content, list):
-            parts: List[str] = []
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                text = part.get("text")
-                if isinstance(text, str) and text.strip():
-                    parts.append(text.strip())
-            if parts:
-                return "\n".join(parts)
+        role = "system" if raw_role in {"system", "developer"} else raw_role
+        if normalized_messages and normalized_messages[-1]["role"] == role == "system":
+            normalized_messages[-1]["content"] = f'{normalized_messages[-1]["content"]}\n\n{text}'
+            continue
 
-    return ""
+        normalized_messages.append({"role": role, "content": text})
+
+    return normalized_messages
 
 
 def _build_openrouter_like_response(answer_text: str, model: str) -> Dict[str, Any]:
@@ -300,11 +348,45 @@ def _build_openrouter_like_response(answer_text: str, model: str) -> Dict[str, A
     }
 
 
+def _stringify_error_detail(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, dict):
+        if isinstance(detail.get("message"), str) and detail["message"].strip():
+            return detail["message"].strip()
+        if isinstance(detail.get("detail"), str) and detail["detail"].strip():
+            return detail["detail"].strip()
+    return str(detail)
+
+
+def _build_openrouter_like_error(message: str, *, error_type: str = "adapter_error") -> Dict[str, Any]:
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+        }
+    }
+
+
 def create_app() -> FastAPI:
     odr_runner = OpenDeepResearchRunner()
     tool_gateway = ODRToolGateway(runner=odr_runner)
 
     app = FastAPI(title="Open Deep Research Orchestrator Adapter", version="1.1.0")
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_build_openrouter_like_error(_stringify_error_detail(exc.detail), error_type="http_error"),
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content=_build_openrouter_like_error(str(exc), error_type="internal_error"),
+        )
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -351,14 +433,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
         input_payload = payload.get("input")
-        user_query = _extract_user_query(input_payload)
-        if not user_query:
+        input_messages = _normalize_input_messages(input_payload)
+        if not input_messages:
             raise HTTPException(status_code=400, detail="Unable to extract user query from input messages")
 
         model = str(payload.get("model") or os.getenv("ODR_ADAPTER_MODEL_ID", "open_deep_research"))
 
         try:
-            answer = await odr_runner.run(user_query)
+            answer = await odr_runner.run(input_messages)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Open Deep Research execution failed: {exc}") from exc
 

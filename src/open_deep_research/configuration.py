@@ -2,7 +2,7 @@
 
 import os
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
@@ -13,6 +13,7 @@ class SearchAPI(Enum):
     
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    OPENROUTER = "openrouter"
     TAVILY = "tavily"
     NONE = "none"
 
@@ -85,11 +86,94 @@ class Configuration(BaseModel):
                 "options": [
                     {"label": "Tavily", "value": SearchAPI.TAVILY.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
+                    {"label": "OpenRouter Web Search", "value": SearchAPI.OPENROUTER.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
                 ]
             }
         }
+    )
+    openrouter_web_search_engine: str = Field(
+        default="auto",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "select",
+                "default": "auto",
+                "description": "Search engine to use when search_api is set to openrouter.",
+                "options": [
+                    {"label": "Auto", "value": "auto"},
+                    {"label": "Native", "value": "native"},
+                    {"label": "Exa", "value": "exa"},
+                    {"label": "Firecrawl", "value": "firecrawl"},
+                    {"label": "Parallel", "value": "parallel"},
+                ],
+            }
+        },
+    )
+    openrouter_web_search_max_results: Optional[int] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "description": "Maximum results per OpenRouter web search call.",
+            }
+        },
+    )
+    openrouter_web_search_max_total_results: Optional[int] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "description": "Maximum total results across all OpenRouter web searches in a single request.",
+            }
+        },
+    )
+    openrouter_web_search_context_size: Optional[str] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "select",
+                "description": "Context size for OpenRouter web search. Only applies to engines that support it.",
+                "options": [
+                    {"label": "Low", "value": "low"},
+                    {"label": "Medium", "value": "medium"},
+                    {"label": "High", "value": "high"},
+                ],
+            }
+        },
+    )
+    openrouter_web_search_allowed_domains: Optional[List[str]] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "description": "Comma-separated domains to allow for OpenRouter web search.",
+            }
+        },
+    )
+    openrouter_web_search_excluded_domains: Optional[List[str]] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "description": "Comma-separated domains to exclude from OpenRouter web search.",
+            }
+        },
+    )
+    openrouter_web_search_user_location: Optional[Dict[str, str]] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "description": "Optional OpenRouter web search user location object.",
+            }
+        },
     )
     max_researcher_iterations: int = Field(
         default=6,
@@ -128,13 +212,13 @@ class Configuration(BaseModel):
             }
         }
     )
-    summarization_model_max_tokens: int = Field(
-        default=8192,
+    summarization_model_max_tokens: Optional[int] = Field(
+        default=None,
+        optional=True,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 8192,
-                "description": "Maximum output tokens for summarization model"
+                "description": "Optional maximum output tokens for summarization model"
             }
         }
     )
@@ -160,13 +244,13 @@ class Configuration(BaseModel):
             }
         }
     )
-    research_model_max_tokens: int = Field(
-        default=10000,
+    research_model_max_tokens: Optional[int] = Field(
+        default=None,
+        optional=True,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 10000,
-                "description": "Maximum output tokens for research model"
+                "description": "Optional maximum output tokens for research model"
             }
         }
     )
@@ -180,13 +264,13 @@ class Configuration(BaseModel):
             }
         }
     )
-    compression_model_max_tokens: int = Field(
-        default=8192,
+    compression_model_max_tokens: Optional[int] = Field(
+        default=None,
+        optional=True,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 8192,
-                "description": "Maximum output tokens for compression model"
+                "description": "Optional maximum output tokens for compression model"
             }
         }
     )
@@ -200,13 +284,13 @@ class Configuration(BaseModel):
             }
         }
     )
-    final_report_model_max_tokens: int = Field(
-        default=10000,
+    final_report_model_max_tokens: Optional[int] = Field(
+        default=None,
+        optional=True,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 10000,
-                "description": "Maximum output tokens for final report model"
+                "description": "Optional maximum output tokens for final report model"
             }
         }
     )

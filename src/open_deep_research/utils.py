@@ -40,6 +40,10 @@ TAVILY_SEARCH_DESCRIPTION = (
     "A search engine optimized for comprehensive, accurate, and trusted results. "
     "Useful for when you need to answer questions about current events."
 )
+OPENROUTER_SEARCH_DESCRIPTION = (
+    "Search the public web using OpenRouter web search and return concise findings "
+    "with source references when available."
+)
 @tool(description=TAVILY_SEARCH_DESCRIPTION)
 async def tavily_search(
     queries: List[str],
@@ -85,7 +89,6 @@ async def tavily_search(
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
     summarization_model = init_chat_model(
         model=configurable.summarization_model,
-        max_tokens=configurable.summarization_model_max_tokens,
         api_key=model_api_key,
         base_url=get_base_url_for_model(configurable.summarization_model, config),
         tags=["langsmith:nostream"]
@@ -172,6 +175,191 @@ async def tavily_search_async(
     # Execute all search queries in parallel and return results
     search_results = await asyncio.gather(*search_tasks)
     return search_results
+
+
+def _normalize_openrouter_model_name(model_name: str) -> str:
+    """Convert internal provider-prefixed model ids into OpenRouter-compatible ids."""
+    normalized = (model_name or "").strip()
+    if not normalized:
+        return normalized
+    if normalized.startswith("openrouter/"):
+        return normalized[len("openrouter/"):]
+    if ":" not in normalized:
+        return normalized
+
+    provider, remainder = normalized.split(":", 1)
+    remainder = remainder.strip()
+    if not remainder:
+        return normalized
+    if "/" in remainder:
+        return remainder
+    return f"{provider}/{remainder}"
+
+
+def _get_openrouter_responses_url(model_name: str, config: RunnableConfig) -> str:
+    """Resolve the OpenRouter Responses API endpoint from config/environment."""
+    base_url = (
+        get_base_url_for_model(model_name, config)
+        or os.getenv("OPENROUTER_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "https://openrouter.ai/api/v1"
+    ).rstrip("/")
+
+    if base_url.endswith("/responses"):
+        return base_url
+    return f"{base_url}/responses"
+
+
+def _extract_output_text_from_openrouter_response(data: Dict[str, Any]) -> str:
+    output_text = data.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    collected_parts: List[str] = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []) or []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "output_text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                collected_parts.append(text.strip())
+
+    return "\n".join(collected_parts).strip()
+
+
+def _extract_source_lines_from_openrouter_response(data: Dict[str, Any]) -> List[str]:
+    sources: List[str] = []
+    seen: set[str] = set()
+
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content", []) or []:
+            if not isinstance(part, dict):
+                continue
+            for annotation in part.get("annotations", []) or []:
+                if not isinstance(annotation, dict):
+                    continue
+                url = annotation.get("url") or annotation.get("source_url")
+                title = annotation.get("title") or annotation.get("source_title") or url
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                formatted = f"{title}: {url}" if isinstance(title, str) and title.strip() else url
+                if formatted in seen:
+                    continue
+                seen.add(formatted)
+                sources.append(formatted)
+
+    return sources
+
+
+async def _openrouter_web_search_once(query: str, config: RunnableConfig) -> str:
+    configurable = Configuration.from_runnable_config(config)
+    api_key = get_api_key_for_model(configurable.research_model, config) or os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ToolException("OpenRouter API key is not configured for OpenRouter web search.")
+
+    model_name = _normalize_openrouter_model_name(configurable.research_model)
+    if not model_name:
+        raise ToolException("Research model is not configured for OpenRouter web search.")
+
+    parameters: Dict[str, Any] = {"engine": configurable.openrouter_web_search_engine}
+    if configurable.openrouter_web_search_max_results is not None:
+        parameters["max_results"] = configurable.openrouter_web_search_max_results
+    if configurable.openrouter_web_search_max_total_results is not None:
+        parameters["max_total_results"] = configurable.openrouter_web_search_max_total_results
+    if configurable.openrouter_web_search_context_size:
+        parameters["search_context_size"] = configurable.openrouter_web_search_context_size
+    if configurable.openrouter_web_search_allowed_domains:
+        parameters["allowed_domains"] = configurable.openrouter_web_search_allowed_domains
+    if configurable.openrouter_web_search_excluded_domains:
+        parameters["excluded_domains"] = configurable.openrouter_web_search_excluded_domains
+    if configurable.openrouter_web_search_user_location:
+        parameters["user_location"] = configurable.openrouter_web_search_user_location
+
+    payload = {
+        "model": model_name,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Use web search to answer the query below. "
+                            "Return concise factual findings grounded in the discovered sources.\n\n"
+                            f"Query: {query}"
+                        ),
+                    }
+                ],
+            }
+        ],
+        "tools": [
+            {
+                "type": "openrouter:web_search",
+                "parameters": parameters,
+            }
+        ],
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            _get_openrouter_responses_url(configurable.research_model, config),
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=150.0),
+        ) as response:
+            if response.status >= 400:
+                try:
+                    error_payload = await response.json()
+                    message = (
+                        error_payload.get("error", {}).get("message")
+                        or error_payload.get("detail")
+                        or str(error_payload)
+                    )
+                except Exception:
+                    message = await response.text()
+                raise ToolException(f"OpenRouter web search failed: {message}")
+
+            data = await response.json()
+
+    output_text = _extract_output_text_from_openrouter_response(data)
+    if not output_text:
+        output_text = "OpenRouter web search returned no textual summary."
+
+    source_lines = _extract_source_lines_from_openrouter_response(data)
+    formatted_output = f"Search results for query: {query}\n\n{output_text}"
+    if source_lines:
+        formatted_output += "\n\nSources:\n" + "\n".join(f"- {line}" for line in source_lines)
+    return formatted_output
+
+
+@tool("web_search", description=OPENROUTER_SEARCH_DESCRIPTION)
+async def openrouter_web_search(
+    queries: List[str],
+    config: RunnableConfig = None,
+) -> str:
+    """Execute OpenRouter-backed web searches for one or more queries."""
+    normalized_queries = [query.strip() for query in queries if isinstance(query, str) and query.strip()]
+    if not normalized_queries:
+        raise ToolException("web_search requires at least one non-empty query.")
+
+    search_results = await asyncio.gather(
+        *[_openrouter_web_search_once(query, config) for query in normalized_queries]
+    )
+    return "\n\n" + ("\n\n" + ("-" * 80) + "\n\n").join(search_results)
 
 async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
     """Summarize webpage content using AI model with timeout protection.
@@ -529,7 +717,10 @@ async def load_mcp_tools(
 # Tool Utils
 ##########################
 
-async def get_search_tool(search_api: SearchAPI):
+async def get_search_tool(
+    search_api: SearchAPI,
+    configurable: Optional[Configuration] = None,
+):
     """Configure and return search tools based on the specified API provider.
     
     Args:
@@ -549,6 +740,15 @@ async def get_search_tool(search_api: SearchAPI):
     elif search_api == SearchAPI.OPENAI:
         # OpenAI's web search preview functionality
         return [{"type": "web_search_preview"}]
+
+    elif search_api == SearchAPI.OPENROUTER:
+        search_tool = openrouter_web_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search",
+        }
+        return [search_tool]
         
     elif search_api == SearchAPI.TAVILY:
         # Configure Tavily search tool with metadata
@@ -582,7 +782,7 @@ async def get_all_tools(config: RunnableConfig):
     # Add configured search tools
     configurable = Configuration.from_runnable_config(config)
     search_api = SearchAPI(get_config_value(configurable.search_api))
-    search_tools = await get_search_tool(search_api)
+    search_tools = await get_search_tool(search_api, configurable)
     tools.extend(search_tools)
     
     # Track existing tool names to prevent conflicts
@@ -656,6 +856,58 @@ def openai_websearch_called(response):
         if tool_output.get("type") == "web_search_call":
             return True
     
+    return False
+
+
+def _contains_web_search_marker(data: Any) -> bool:
+    """Recursively inspect provider payloads for native web-search markers."""
+    if isinstance(data, dict):
+        marker_type = data.get("type")
+        if isinstance(marker_type, str) and marker_type in {
+            "web_search_call",
+            "web_search_result",
+            "openrouter:web_search",
+        }:
+            return True
+
+        tool_name = data.get("name")
+        if isinstance(tool_name, str) and tool_name in {"web_search", "openrouter:web_search"}:
+            return True
+
+        return any(_contains_web_search_marker(value) for value in data.values())
+
+    if isinstance(data, list):
+        return any(_contains_web_search_marker(item) for item in data)
+
+    return False
+
+
+def openrouter_websearch_called(response):
+    """Detect if OpenRouter native/server web search was used in the response.
+    
+    OpenRouter may surface server tool usage through either usage metadata or
+    provider-specific payload fragments attached to the AI message.
+    """
+    try:
+        usage = response.response_metadata.get("usage")
+        if isinstance(usage, dict):
+            server_tool_use = usage.get("server_tool_use")
+            if isinstance(server_tool_use, dict):
+                web_search_requests = server_tool_use.get("web_search_requests")
+                if isinstance(web_search_requests, int) and web_search_requests > 0:
+                    return True
+
+        additional_kwargs = getattr(response, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and _contains_web_search_marker(additional_kwargs):
+            return True
+
+        response_metadata = getattr(response, "response_metadata", None)
+        if isinstance(response_metadata, dict) and _contains_web_search_marker(response_metadata):
+            return True
+
+    except (AttributeError, TypeError):
+        return False
+
     return False
 
 

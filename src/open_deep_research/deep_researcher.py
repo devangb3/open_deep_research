@@ -49,14 +49,28 @@ from open_deep_research.utils import (
     get_today_str,
     is_token_limit_exceeded,
     openai_websearch_called,
+    openrouter_websearch_called,
     remove_up_to_last_ai_message,
     think_tool,
 )
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key", "base_url"),
+    configurable_fields=("model", "api_key", "base_url"),
 )
+
+
+def _get_system_messages(messages: list) -> list[SystemMessage]:
+    system_messages: list[SystemMessage] = []
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            system_messages.append(message)
+            continue
+        if isinstance(message, dict) and message.get("role") == "system":
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                system_messages.append(SystemMessage(content=content.strip()))
+    return system_messages
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
@@ -81,7 +95,6 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     messages = state["messages"]
     model_config = {
         "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
@@ -135,7 +148,6 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     configurable = Configuration.from_runnable_config(config)
     research_model_config = {
         "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
@@ -196,7 +208,6 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     configurable = Configuration.from_runnable_config(config)
     research_model_config = {
         "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
@@ -335,7 +346,7 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 
         except Exception as e:
             # Handle research execution errors
-            if is_token_limit_exceeded(e, configurable.research_model) or True:
+            if is_token_limit_exceeded(e, configurable.research_model):
                 # Token limit exceeded or other error - end research phase
                 return Command(
                     goto=END,
@@ -344,6 +355,7 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                         "research_brief": state.get("research_brief", "")
                     }
                 )
+            raise
     
     # Step 3: Return command with all tool results
     update_payload["supervisor_messages"] = all_tool_messages
@@ -395,7 +407,6 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
     # Step 2: Configure the researcher model with tools
     research_model_config = {
         "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
@@ -462,7 +473,8 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     has_tool_calls = bool(most_recent_message.tool_calls)
     has_native_search = (
         openai_websearch_called(most_recent_message) or 
-        anthropic_websearch_called(most_recent_message)
+        anthropic_websearch_called(most_recent_message) or
+        openrouter_websearch_called(most_recent_message)
     )
     
     if not has_tool_calls and not has_native_search:
@@ -531,7 +543,6 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
     configurable = Configuration.from_runnable_config(config)
     synthesizer_model = configurable_model.with_config({
         "model": configurable.compression_model,
-        "max_tokens": configurable.compression_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.compression_model, config),
         "base_url": get_base_url_for_model(configurable.compression_model, config),
         "tags": ["langsmith:nostream"]
@@ -632,7 +643,6 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     configurable = Configuration.from_runnable_config(config)
     writer_model_config = {
         "model": configurable.final_report_model,
-        "max_tokens": configurable.final_report_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.final_report_model, config),
         "base_url": get_base_url_for_model(configurable.final_report_model, config),
         "tags": ["langsmith:nostream"]
@@ -652,9 +662,11 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 findings=findings,
                 date=get_today_str()
             )
+            upstream_system_messages = _get_system_messages(state.get("messages", []))
             
             # Generate the final report
             final_report = await configurable_model.with_config(writer_model_config).ainvoke([
+                *upstream_system_messages,
                 HumanMessage(content=final_report_prompt)
             ])
             
