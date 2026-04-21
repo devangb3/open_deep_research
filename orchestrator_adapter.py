@@ -51,6 +51,25 @@ def _parse_csv(raw: Optional[str]) -> Optional[List[str]]:
     return items or None
 
 
+def _load_optional_text_file(path: Path) -> Optional[str]:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return text or None
+
+
+def _load_final_report_system_prompt() -> Optional[str]:
+    final_report_system_prompt_path = (
+        Path(__file__).resolve().parents[1]
+        / "whitepaper"
+        / "browsecomp"
+        / "prompts"
+        / "odr_report_gen_system.txt"
+    )
+    return _load_optional_text_file(final_report_system_prompt_path)
+
+
 class OpenDeepResearchRunner:
     """Lazy ODR graph wrapper for /responses execution."""
 
@@ -80,15 +99,18 @@ class OpenDeepResearchRunner:
             ),
             "max_researcher_iterations": _parse_int(os.getenv("ODR_MAX_RESEARCHER_ITERATIONS"), 4),
             "max_react_tool_calls": _parse_int(os.getenv("ODR_MAX_REACT_TOOL_CALLS"), 8),
-            "summarization_model": os.getenv("ODR_SUMMARIZATION_MODEL", "openai:gpt-4.1-mini"),
+            "summarization_model": os.getenv("ODR_SUMMARIZATION_MODEL", "openai:google/gemini-3.1-flash-lite-preview"),
             "summarization_model_max_tokens": _parse_optional_int(os.getenv("ODR_SUMMARIZATION_MODEL_MAX_TOKENS")),
-            "research_model": os.getenv("ODR_RESEARCH_MODEL", "openai:gpt-4.1"),
+            "research_model": os.getenv("ODR_RESEARCH_MODEL", "openai:google/gemini-3.1-pro-preview"),
             "research_model_max_tokens": _parse_optional_int(os.getenv("ODR_RESEARCH_MODEL_MAX_TOKENS")),
-            "compression_model": os.getenv("ODR_COMPRESSION_MODEL", "openai:gpt-4.1"),
+            "compression_model": os.getenv("ODR_COMPRESSION_MODEL", "openai:google/gemini-3.1-flash-lite-preview"),
             "compression_model_max_tokens": _parse_optional_int(os.getenv("ODR_COMPRESSION_MODEL_MAX_TOKENS")),
-            "final_report_model": os.getenv("ODR_FINAL_REPORT_MODEL", "openai:gpt-4.1"),
+            "final_report_model": os.getenv("ODR_FINAL_REPORT_MODEL", "openai:google/gemini-3.1-pro-preview"),
             "final_report_model_max_tokens": _parse_optional_int(os.getenv("ODR_FINAL_REPORT_MODEL_MAX_TOKENS")),
         }
+        final_report_system_prompt = _load_final_report_system_prompt()
+        if final_report_system_prompt:
+            configurable["final_report_system_prompt"] = final_report_system_prompt
 
         mcp_url = os.getenv("ODR_MCP_URL")
         mcp_tools_raw = os.getenv("ODR_MCP_TOOLS")
@@ -106,12 +128,21 @@ class OpenDeepResearchRunner:
 
         return configurable
 
-    def runtime_config(self, *, thread_id: Optional[str] = None) -> Dict[str, Any]:
+    def runtime_config(
+        self,
+        *,
+        thread_id: Optional[str] = None,
+        lead_researcher_prompt_override: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        configurable = {
+            "thread_id": thread_id or str(uuid.uuid4()),
+            **self._configurable(),
+        }
+        if isinstance(lead_researcher_prompt_override, str) and lead_researcher_prompt_override.strip():
+            configurable["lead_researcher_prompt_override"] = lead_researcher_prompt_override.strip()
+
         return {
-            "configurable": {
-                "thread_id": thread_id or str(uuid.uuid4()),
-                **self._configurable(),
-            },
+            "configurable": configurable,
             "metadata": {
                 "owner": os.getenv("ODR_OWNER", "odr_adapter"),
             },
@@ -153,9 +184,14 @@ class OpenDeepResearchRunner:
 
         return ""
 
-    async def run(self, input_messages: List[Dict[str, str]]) -> str:
+    async def run(
+        self,
+        input_messages: List[Dict[str, str]],
+        *,
+        lead_researcher_prompt_override: Optional[str] = None,
+    ) -> str:
         graph = self._load_graph()
-        config = self.runtime_config()
+        config = self.runtime_config(lead_researcher_prompt_override=lead_researcher_prompt_override)
 
         if not any(message.get("role") == "user" and message.get("content", "").strip() for message in input_messages):
             raise RuntimeError("Open Deep Research requires at least one non-empty user message")
@@ -316,6 +352,25 @@ def _normalize_input_messages(input_payload: Any) -> List[Dict[str, str]]:
     return normalized_messages
 
 
+def _split_lead_researcher_prompt_override(
+    input_messages: List[Dict[str, str]],
+) -> tuple[Optional[str], List[Dict[str, str]]]:
+    override_parts: List[str] = []
+    forwarded_messages: List[Dict[str, str]] = []
+
+    for message in input_messages:
+        role = message.get("role")
+        content = str(message.get("content") or "").strip()
+        if role == "system":
+            if content:
+                override_parts.append(content)
+            continue
+        forwarded_messages.append(message)
+
+    override = "\n\n".join(override_parts).strip() or None
+    return override, forwarded_messages
+
+
 def _build_openrouter_like_response(answer_text: str, model: str) -> Dict[str, Any]:
     now = int(time.time())
     return {
@@ -436,11 +491,17 @@ def create_app() -> FastAPI:
         input_messages = _normalize_input_messages(input_payload)
         if not input_messages:
             raise HTTPException(status_code=400, detail="Unable to extract user query from input messages")
+        lead_researcher_prompt_override, forwarded_messages = _split_lead_researcher_prompt_override(input_messages)
+        if not forwarded_messages:
+            raise HTTPException(status_code=400, detail="Unable to extract non-system input messages")
 
         model = str(payload.get("model") or os.getenv("ODR_ADAPTER_MODEL_ID", "open_deep_research"))
 
         try:
-            answer = await odr_runner.run(input_messages)
+            answer = await odr_runner.run(
+                forwarded_messages,
+                lead_researcher_prompt_override=lead_researcher_prompt_override,
+            )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Open Deep Research execution failed: {exc}") from exc
 

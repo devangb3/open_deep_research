@@ -294,6 +294,26 @@ class Configuration(BaseModel):
             }
         }
     )
+    final_report_system_prompt: Optional[str] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "description": "Optional fixed system prompt for the final report writer."
+            }
+        }
+    )
+    lead_researcher_prompt_override: Optional[str] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "description": "Optional request-scoped template that replaces the lead researcher supervisor prompt."
+            }
+        }
+    )
     # MCP server configuration
     mcp_config: Optional[MCPConfig] = Field(
         default=None,

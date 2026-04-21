@@ -20,11 +20,11 @@ from open_deep_research.configuration import (
     Configuration,
 )
 from open_deep_research.prompts import (
+    build_lead_researcher_prompt,
     clarify_with_user_instructions,
     compress_research_simple_human_message,
     compress_research_system_prompt,
     final_report_generation_prompt,
-    lead_researcher_prompt,
     research_system_prompt,
     transform_messages_into_research_topic_prompt,
 )
@@ -71,6 +71,24 @@ def _get_system_messages(messages: list) -> list[SystemMessage]:
             if isinstance(content, str) and content.strip():
                 system_messages.append(SystemMessage(content=content.strip()))
     return system_messages
+
+
+def _build_final_report_writer_messages(
+    *,
+    state_messages: list,
+    final_report_prompt_text: str,
+    fixed_system_prompt: str | None,
+) -> list[SystemMessage | HumanMessage]:
+    if isinstance(fixed_system_prompt, str) and fixed_system_prompt.strip():
+        return [
+            SystemMessage(content=fixed_system_prompt.strip()),
+            HumanMessage(content=final_report_prompt_text),
+        ]
+
+    return [
+        *_get_system_messages(state_messages),
+        HumanMessage(content=final_report_prompt_text),
+    ]
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
@@ -169,10 +187,11 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
     
     # Step 3: Initialize supervisor with research brief and instructions
-    supervisor_system_prompt = lead_researcher_prompt.format(
+    supervisor_system_prompt = build_lead_researcher_prompt(
         date=get_today_str(),
         max_concurrent_research_units=configurable.max_concurrent_research_units,
-        max_researcher_iterations=configurable.max_researcher_iterations
+        max_researcher_iterations=configurable.max_researcher_iterations,
+        override=configurable.lead_researcher_prompt_override,
     )
     
     return Command(
@@ -662,13 +681,14 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 findings=findings,
                 date=get_today_str()
             )
-            upstream_system_messages = _get_system_messages(state.get("messages", []))
+            writer_messages = _build_final_report_writer_messages(
+                state_messages=state.get("messages", []),
+                final_report_prompt_text=final_report_prompt,
+                fixed_system_prompt=configurable.final_report_system_prompt,
+            )
             
             # Generate the final report
-            final_report = await configurable_model.with_config(writer_model_config).ainvoke([
-                *upstream_system_messages,
-                HumanMessage(content=final_report_prompt)
-            ])
+            final_report = await configurable_model.with_config(writer_model_config).ainvoke(writer_messages)
             
             # Return successful report generation
             return {

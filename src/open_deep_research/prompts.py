@@ -135,6 +135,21 @@ After each ConductResearch tool call, use think_tool to analyze the results:
 - Do NOT use acronyms or abbreviations in your research questions, be very clear and specific
 </Scaling Rules>"""
 
+
+def build_lead_researcher_prompt(
+    *,
+    date: str,
+    max_concurrent_research_units: int,
+    max_researcher_iterations: int,
+    override: str | None = None,
+) -> str:
+    prompt_template = override.strip() if override and override.strip() else lead_researcher_prompt
+    return prompt_template.format(
+        date=date,
+        max_concurrent_research_units=max_concurrent_research_units,
+        max_researcher_iterations=max_researcher_iterations,
+    ).strip()
+
 research_system_prompt = """You are a research assistant conducting research on the user's input topic. For context, today's date is {date}.
 
 <Task>
